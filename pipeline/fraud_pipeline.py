@@ -19,8 +19,6 @@ Compile with::
     python pipeline/fraud_pipeline.py
     # produces fraud_pipeline.yaml in the current directory
 """
-from __future__ import annotations
-
 import logging
 from typing import NamedTuple
 
