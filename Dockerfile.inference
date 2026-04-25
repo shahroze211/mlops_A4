@@ -1,0 +1,114 @@
+FROM python:3.10-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    MODEL_PATH=/model/model.joblib
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libgomp1 \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir \
+        pandas==2.1.4 \
+        numpy==1.26.4 \
+        scikit-learn==1.4.0 \
+        lightgbm==4.2.0 \
+        xgboost==2.0.3 \
+        joblib==1.3.2 \
+        fastapi==0.110.0 \
+        uvicorn==0.27.1 \
+        prometheus-client==0.20.0 \
+        pydantic==2.6.1
+
+COPY src/metrics_exporter.py /app/metrics_exporter.py
+
+RUN cat > /app/server.py <<'PY'
+"""Lightweight inference server with Prometheus instrumentation."""
+import os
+import time
+from contextlib import asynccontextmanager
+from typing import Dict, List
+
+import joblib
+import numpy as np
+import pandas as pd
+from fastapi import FastAPI, HTTPException
+from prometheus_client import make_asgi_app
+from pydantic import BaseModel
+
+from metrics_exporter import (
+    REQUEST_LATENCY, REQUESTS_TOTAL, CONFIDENCE,
+)
+
+MODEL_PATH = os.environ.get("MODEL_PATH", "/model/model.joblib")
+state: Dict = {}
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if not os.path.exists(MODEL_PATH):
+        raise RuntimeError(f"Model bundle not found at {MODEL_PATH}")
+    state["bundle"] = joblib.load(MODEL_PATH)
+    yield
+    state.clear()
+
+
+app = FastAPI(title="IEEE CIS Fraud Detector", lifespan=lifespan)
+app.mount("/metrics", make_asgi_app())
+
+
+class Transaction(BaseModel):
+    features: Dict[str, float]
+
+
+@app.post("/predict")
+def predict(tx: Transaction):
+    start = time.perf_counter()
+    try:
+        bundle = state["bundle"]
+        model = bundle["model"] if isinstance(bundle, dict) else bundle
+        feats: List[str] = (
+            bundle.get("features") or bundle.get("feature_names")
+            if isinstance(bundle, dict) else list(model.feature_names_in_)
+        )
+        x = pd.DataFrame([{f: float(tx.features.get(f, 0.0)) for f in feats}])
+        proba = float(model.predict_proba(x)[0, 1])
+        REQUESTS_TOTAL.labels(status="ok").inc()
+        CONFIDENCE.observe(proba)
+        return {
+            "fraud_probability": proba,
+            "is_fraud": proba >= 0.5,
+        }
+    except Exception as e:
+        REQUESTS_TOTAL.labels(status="error").inc()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        REQUEST_LATENCY.observe(time.perf_counter() - start)
+
+
+@app.get("/healthz")
+def healthz():
+    return {"status": "ok", "model_loaded": "bundle" in state}
+
+
+@app.get("/readyz")
+def readyz():
+    if "bundle" not in state:
+        raise HTTPException(status_code=503, detail="model not loaded")
+    return {"status": "ready"}
+PY
+
+RUN useradd --create-home --shell /bin/bash mlops \
+    && chown -R mlops:mlops /app
+USER mlops
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD curl -f http://localhost:8080/healthz || exit 1
+
+CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8080"]

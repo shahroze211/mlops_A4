@@ -1,0 +1,331 @@
+name: MLOps Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Trigger reason (drift|recall_drop|manual)"
+        required: true
+        default: "manual"
+  schedule:
+    - cron: "0 */6 * * *"  # poll every 6h - decide whether to retrain
+  repository_dispatch:
+    types: [drift_alert, performance_drop]
+
+env:
+  IMAGE_REGISTRY: ghcr.io/${{ github.repository }}
+  PYTHON_VERSION: "3.10"
+
+permissions:
+  contents: read
+  packages: write
+  actions: write
+
+jobs:
+  # =====================================================================
+  # Stage 1: CI - Lint + inline unit tests
+  # =====================================================================
+  ci:
+    name: CI - Lint and Unit Tests
+    runs-on: ubuntu-latest
+    outputs:
+      tests_passed: ${{ steps.tests.outputs.passed }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install \
+            ruff==0.3.4 pytest==8.1.1 \
+            pandas==2.1.4 numpy==1.26.4 scipy==1.11.4 \
+            scikit-learn==1.4.0 xgboost==2.0.3 lightgbm==4.2.0 \
+            imbalanced-learn==0.12.0 category-encoders==2.6.3 \
+            shap==0.44.1 matplotlib==3.8.2 joblib==1.3.2 \
+            prometheus-client==0.20.0 pyarrow==14.0.2
+
+      - name: Lint with ruff
+        run: ruff check --select F,E9 src pipeline
+
+      - name: Inline unit tests
+        id: tests
+        run: |
+          mkdir -p tests
+          cat > tests/__init__.py <<'PY'
+          PY
+          cat > tests/test_smoke.py <<'PY'
+          """Smoke tests covering preprocessing, training, and drift detection."""
+          import argparse
+          import os
+
+          import numpy as np
+          import pandas as pd
+          from sklearn.datasets import make_classification
+
+
+          def _toy_frame(n: int = 2000) -> pd.DataFrame:
+              X, y = make_classification(
+                  n_samples=n,
+                  n_features=30,
+                  n_informative=20,
+                  weights=[0.97, 0.03],
+                  random_state=0,
+              )
+              df = pd.DataFrame(X, columns=[f"V{i + 1}" for i in range(30)])
+              df["TransactionID"] = np.arange(n)
+              df["TransactionDT"] = np.arange(n) * 60
+              df["TransactionAmt"] = np.abs(np.random.RandomState(0).randn(n) * 100)
+              df["card1"] = np.random.RandomState(1).randint(1000, 2000, size=n).astype(str)
+              df["card4"] = np.random.RandomState(2).choice(["visa", "mastercard"], size=n)
+              df["P_emaildomain"] = np.random.RandomState(3).choice(
+                  ["gmail.com", "yahoo.com"], size=n,
+              )
+              df["isFraud"] = y
+              return df
+
+
+          def test_preprocessing_runs(tmp_path):
+              from src import data_preprocessing as dp
+
+              p = tmp_path / "raw.csv"
+              _toy_frame().to_csv(p, index=False)
+              args = argparse.Namespace(input=str(p), sample=None)
+              os.chdir(tmp_path)
+              out = dp.run(args)
+              assert len(out["results"]) == 2
+              assert {r["strategy"] for r in out["results"]} == {"SMOTE", "class_weight"}
+
+
+          def test_train_runs(tmp_path):
+              from src import train as tr
+
+              p = tmp_path / "feat.parquet"
+              _toy_frame().to_parquet(p, index=False)
+              args = argparse.Namespace(input=str(p))
+              os.chdir(tmp_path)
+              out = tr.run(args)
+              names = {r["name"] for r in out["results"]}
+              assert names == {"xgboost", "lightgbm", "random_forest_rfe"}
+
+
+          def test_drift_signature():
+              from src import drift_simulation as ds
+
+              df = _toy_frame()
+              report = ds.detect_drift(df.head(1000), df.tail(1000))
+              assert hasattr(report, "psi") and hasattr(report, "ks")
+              assert isinstance(report.summary, dict)
+              assert "psi_max" in report.summary
+
+
+          def test_cost_sensitive_runs(tmp_path):
+              from src import cost_sensitive as cs
+
+              p = tmp_path / "feat.parquet"
+              _toy_frame().to_parquet(p, index=False)
+              args = argparse.Namespace(
+                  input=str(p),
+                  fraud_loss_ratio=1.0,
+                  false_alarm_cost=5.0,
+                  review_cost=2.0,
+              )
+              os.chdir(tmp_path)
+              out = cs.run(args)
+              assert len(out["results"]) == 2
+              assert {r["strategy"] for r in out["results"]} == {"baseline", "cost_sensitive"}
+          PY
+          PYTHONPATH=. pytest tests -q --tb=short
+          echo "passed=true" >> "$GITHUB_OUTPUT"
+
+  # =====================================================================
+  # Stage 2: Build training and inference container images
+  # =====================================================================
+  build:
+    name: Build - Training and Inference Images
+    needs: ci
+    if: needs.ci.outputs.tests_passed == 'true' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push training image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.training
+          push: true
+          tags: |
+            ${{ env.IMAGE_REGISTRY }}/training:${{ github.sha }}
+            ${{ env.IMAGE_REGISTRY }}/training:latest
+          cache-from: type=gha,scope=training
+          cache-to: type=gha,mode=max,scope=training
+
+      - name: Build and push inference image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.inference
+          push: true
+          tags: |
+            ${{ env.IMAGE_REGISTRY }}/inference:${{ github.sha }}
+            ${{ env.IMAGE_REGISTRY }}/inference:latest
+          cache-from: type=gha,scope=inference
+          cache-to: type=gha,mode=max,scope=inference
+
+  # =====================================================================
+  # Stage 3: CD - Compile and submit Kubeflow pipeline run
+  # =====================================================================
+  cd:
+    name: CD - Submit Kubeflow Pipeline
+    needs: build
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Compile pipeline IR
+        run: |
+          pip install kfp==2.7.0
+          python pipeline/fraud_pipeline.py
+          ls -la fraud_pipeline.yaml
+
+      - name: Upload pipeline IR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kfp-pipeline-ir
+          path: fraud_pipeline.yaml
+
+      - name: Submit run via KFP SDK
+        env:
+          KFP_HOST: ${{ secrets.KFP_HOST }}
+          KFP_TOKEN: ${{ secrets.KFP_TOKEN }}
+          IMAGE_TAG: ${{ github.sha }}
+          DISPATCH_REASON: ${{ github.event.inputs.reason || github.event.action || 'push' }}
+        run: |
+          python - <<'PY'
+          import os
+          if not os.environ.get("KFP_HOST"):
+              print("KFP_HOST not configured - emitting dry-run summary instead.")
+              raise SystemExit(0)
+          from kfp.client import Client
+          client = Client(
+              host=os.environ["KFP_HOST"],
+              existing_token=os.environ.get("KFP_TOKEN"),
+          )
+          run = client.create_run_from_pipeline_package(
+              pipeline_file="fraud_pipeline.yaml",
+              arguments={
+                  "raw_csv_uri": "gs://fraud-data/ieee-cis/train_transaction.csv",
+                  "accuracy_threshold": 0.92,
+                  "deployment_target": "kserve://fraud-detection",
+                  "tune_iterations": 10,
+              },
+              experiment_name="fraud-detection-prod",
+              run_name=f"fraud-{os.environ['IMAGE_TAG'][:7]}-{os.environ['DISPATCH_REASON']}",
+          )
+          print(f"Submitted KFP run id={run.run_id}")
+          PY
+
+  # =====================================================================
+  # Stage 4: Intelligent retrain trigger - drift / performance watcher
+  # =====================================================================
+  intelligent_trigger:
+    name: Trigger - Drift and Performance Watcher
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'repository_dispatch'
+    outputs:
+      should_retrain: ${{ steps.decide.outputs.retrain }}
+      reason: ${{ steps.decide.outputs.reason }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Decide whether to retrain
+        id: decide
+        env:
+          PROM_URL: ${{ secrets.PROM_URL }}
+          DISPATCH_REASON: ${{ github.event.client_payload.reason || github.event.action }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          pip install requests
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import os
+          import sys
+          import urllib.parse
+          import urllib.request
+
+          retrain = False
+          reason = "no_signal"
+
+          # Path A: explicit alert dispatch from Alertmanager.
+          if os.environ.get("EVENT_NAME") == "repository_dispatch":
+              retrain = True
+              reason = os.environ.get("DISPATCH_REASON", "alert")
+
+          # Path B: scheduled poll - query Prometheus for recall + drift.
+          prom = os.environ.get("PROM_URL")
+          if prom and not retrain:
+              def query(q: str):
+                  url = f"{prom.rstrip('/')}/api/v1/query?query={urllib.parse.quote(q)}"
+                  with urllib.request.urlopen(url, timeout=15) as r:
+                      data = json.load(r)
+                  result = data.get("data", {}).get("result", [])
+                  return float(result[0]["value"][1]) if result else None
+
+              try:
+                  recall = query("fraud_recall")
+                  psi = query("feature_psi_max")
+                  if recall is not None and recall < 0.75:
+                      retrain, reason = True, f"recall_drop:{recall:.3f}"
+                  elif psi is not None and psi > 0.25:
+                      retrain, reason = True, f"drift_spike:{psi:.3f}"
+              except Exception as e:
+                  print(f"prom query failed: {e}", file=sys.stderr)
+
+          print(f"retrain={'true' if retrain else 'false'}")
+          print(f"reason={reason}")
+          PY
+
+      - name: Re-dispatch CD if retrain needed
+        if: steps.decide.outputs.retrain == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'mlops_pipeline.yml',
+              ref: 'main',
+              inputs: {
+                reason: '${{ steps.decide.outputs.reason }}'
+              }
+            });
+            core.notice(`Retrain triggered: ${{ steps.decide.outputs.reason }}`);

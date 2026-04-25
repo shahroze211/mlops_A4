@@ -1,0 +1,82 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: fraud-storage
+provisioner: kubernetes.io/no-provisioner
+reclaimPolicy: Retain
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: fraud-artifacts-pv
+  labels:
+    type: artifacts
+    app: fraud-detection
+spec:
+  capacity:
+    storage: 100Gi
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: fraud-storage
+  hostPath:
+    path: /mnt/data/fraud-artifacts
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: fraud-artifacts-pvc
+  namespace: fraud-detection
+  labels:
+    app: fraud-detection
+    purpose: pipeline-artifacts
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 100Gi
+  storageClassName: fraud-storage
+  selector:
+    matchLabels:
+      type: artifacts
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: fraud-models-pv
+  labels:
+    type: models
+    app: fraud-detection
+spec:
+  capacity:
+    storage: 50Gi
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: fraud-storage
+  hostPath:
+    path: /mnt/data/fraud-models
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: fraud-models-pvc
+  namespace: fraud-detection
+  labels:
+    app: fraud-detection
+    purpose: model-registry
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: fraud-storage
+  selector:
+    matchLabels:
+      type: models

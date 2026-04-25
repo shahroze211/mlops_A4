@@ -1,0 +1,159 @@
+groups:
+  - name: fraud_detection_model_performance
+    interval: 30s
+    rules:
+      - alert: FraudRecallDrop
+        expr: fraud_recall < 0.75
+        for: 5m
+        labels:
+          severity: critical
+          team: mlops
+          dispatch_event: performance_drop
+        annotations:
+          summary: "Fraud recall dropped below 75% on {{ $labels.instance }}"
+          description: |
+            Current fraud recall is {{ $value | humanizePercentage }}.
+            The model is missing too many fraudulent transactions.
+            Trigger immediate retraining via the intelligent_trigger workflow.
+          runbook_url: "https://runbooks.example.com/fraud-recall-drop"
+
+      - alert: FraudRecallSevereDrop
+        expr: fraud_recall < 0.60
+        for: 2m
+        labels:
+          severity: page
+          team: mlops
+          dispatch_event: performance_drop
+        annotations:
+          summary: "CRITICAL: Fraud recall below 60%"
+          description: "Recall={{ $value }} - rollback required."
+
+      - alert: FraudPrecisionDrop
+        expr: fraud_precision < 0.50
+        for: 10m
+        labels:
+          severity: warning
+          team: mlops
+        annotations:
+          summary: "Fraud precision below 50% - excessive false alarms"
+          description: |
+            Precision={{ $value | humanizePercentage }}.
+            Customer-experience friction is increasing.
+
+      - alert: HighFalsePositiveRate
+        expr: fraud_false_positive_rate > 0.05
+        for: 10m
+        labels:
+          severity: warning
+          team: mlops
+        annotations:
+          summary: "False-positive rate exceeds 5%"
+          description: "FPR={{ $value | humanizePercentage }}."
+
+  - name: fraud_detection_drift
+    interval: 60s
+    rules:
+      - alert: FeatureDriftSpike
+        expr: feature_psi_max > 0.25
+        for: 10m
+        labels:
+          severity: critical
+          team: mlops
+          dispatch_event: drift_alert
+        annotations:
+          summary: "Feature drift PSI > 0.25 (significant shift)"
+          description: |
+            Maximum feature PSI={{ $value }}.
+            Feature {{ $labels.feature }} drifted significantly from training.
+          runbook_url: "https://runbooks.example.com/feature-drift"
+
+      - alert: PredictionDriftWarning
+        expr: prediction_psi > 0.10
+        for: 30m
+        labels:
+          severity: warning
+          team: mlops
+        annotations:
+          summary: "Prediction distribution drifting"
+          description: "Prediction PSI={{ $value }} - investigate input shift."
+
+      - alert: KSStatisticHigh
+        expr: feature_ks_statistic > 0.30
+        for: 15m
+        labels:
+          severity: warning
+          team: mlops
+        annotations:
+          summary: "KS statistic high for feature {{ $labels.feature }}"
+          description: "KS={{ $value }} indicates distributional shift."
+
+  - name: fraud_detection_latency
+    interval: 30s
+    rules:
+      - alert: InferenceLatencySpike
+        expr: histogram_quantile(0.95, rate(inference_request_duration_seconds_bucket[5m])) > 0.500
+        for: 5m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "P95 inference latency > 500ms"
+          description: |
+            P95 latency = {{ $value }}s. SLO breached on {{ $labels.instance }}.
+
+      - alert: InferenceLatencyP99Spike
+        expr: histogram_quantile(0.99, rate(inference_request_duration_seconds_bucket[5m])) > 1.0
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "P99 inference latency > 1s"
+
+      - alert: InferenceErrorRate
+        expr: |
+          sum(rate(inference_requests_total{status="error"}[5m]))
+          /
+          sum(rate(inference_requests_total[5m]))
+          > 0.02
+        for: 5m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Inference error rate > 2%"
+          description: "Error ratio={{ $value | humanizePercentage }}."
+
+  - name: fraud_detection_system
+    interval: 30s
+    rules:
+      - alert: PodCrashLooping
+        expr: rate(kube_pod_container_status_restarts_total{namespace="fraud-detection"}[10m]) > 0
+        for: 10m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Pod {{ $labels.pod }} crash-looping"
+
+      - alert: HighMemoryUtilisation
+        expr: |
+          container_memory_working_set_bytes{namespace="fraud-detection"}
+          /
+          container_spec_memory_limit_bytes{namespace="fraud-detection"}
+          > 0.90
+        for: 10m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Container {{ $labels.container }} memory > 90% of limit"
+
+      - alert: TrainingJobFailed
+        expr: increase(kube_job_status_failed{namespace="fraud-detection"}[1h]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          team: mlops
+        annotations:
+          summary: "Training job {{ $labels.job_name }} failed"

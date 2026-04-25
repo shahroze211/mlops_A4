@@ -1,0 +1,206 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": "-- Grafana --",
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "title": "Fraud Detection - MLOps Overview",
+  "uid": "fraud-mlops-overview",
+  "schemaVersion": 38,
+  "version": 1,
+  "tags": ["fraud", "mlops", "ieee-cis"],
+  "timezone": "browser",
+  "time": {"from": "now-24h", "to": "now"},
+  "refresh": "30s",
+  "templating": {
+    "list": [
+      {
+        "name": "instance",
+        "type": "query",
+        "datasource": "Prometheus",
+        "query": "label_values(inference_requests_total, instance)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "1. System Health",
+      "gridPos": {"x": 0, "y": 0, "w": 24, "h": 1},
+      "collapsed": false
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "System Health - Latency / Throughput / Errors",
+      "datasource": "Prometheus",
+      "gridPos": {"x": 0, "y": 1, "w": 24, "h": 9},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisPlacement": "auto",
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {"mode": "none"}
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "red", "value": 0.5}
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "p95 latency (s)"},
+            "properties": [{"id": "unit", "value": "s"}]
+          },
+          {
+            "matcher": {"id": "byName", "options": "p99 latency (s)"},
+            "properties": [{"id": "unit", "value": "s"}]
+          },
+          {
+            "matcher": {"id": "byName", "options": "error rate"},
+            "properties": [{"id": "unit", "value": "percentunit"}]
+          }
+        ]
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "lastNotNull", "max"]},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(inference_request_duration_seconds_bucket{instance=~\"$instance\"}[5m])))",
+          "legendFormat": "p95 latency (s)",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(inference_request_duration_seconds_bucket{instance=~\"$instance\"}[5m])))",
+          "legendFormat": "p99 latency (s)",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(rate(inference_requests_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "requests/s",
+          "refId": "C"
+        },
+        {
+          "expr": "sum(rate(inference_requests_total{status=\"error\",instance=~\"$instance\"}[5m])) / clamp_min(sum(rate(inference_requests_total{instance=~\"$instance\"}[5m])), 1e-9)",
+          "legendFormat": "error rate",
+          "refId": "D"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "row",
+      "title": "2. Model Performance",
+      "gridPos": {"x": 0, "y": 10, "w": 24, "h": 1},
+      "collapsed": false
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Model Performance - Recall / Precision / F1 / AUC / FPR",
+      "datasource": "Prometheus",
+      "gridPos": {"x": 0, "y": 11, "w": 24, "h": 9},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "color": {"mode": "palette-classic"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "orange", "value": 0.75},
+              {"color": "green", "value": 0.85}
+            ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 5,
+            "lineInterpolation": "smooth"
+          }
+        }
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "lastNotNull", "min"]}
+      },
+      "targets": [
+        {"expr": "fraud_recall", "legendFormat": "recall", "refId": "A"},
+        {"expr": "fraud_precision", "legendFormat": "precision", "refId": "B"},
+        {"expr": "fraud_f1", "legendFormat": "f1", "refId": "C"},
+        {"expr": "fraud_auc_roc", "legendFormat": "auc-roc", "refId": "D"},
+        {"expr": "fraud_false_positive_rate", "legendFormat": "fpr", "refId": "E"}
+      ]
+    },
+    {
+      "id": 5,
+      "type": "row",
+      "title": "3. Data Drift",
+      "gridPos": {"x": 0, "y": 20, "w": 24, "h": 1},
+      "collapsed": false
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Data Drift - Feature PSI / Prediction PSI / KS",
+      "datasource": "Prometheus",
+      "gridPos": {"x": 0, "y": 21, "w": 24, "h": 9},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {"mode": "palette-classic"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "orange", "value": 0.10},
+              {"color": "red", "value": 0.25}
+            ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        }
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "lastNotNull", "max"]}
+      },
+      "targets": [
+        {"expr": "feature_psi_max", "legendFormat": "max feature PSI", "refId": "A"},
+        {"expr": "prediction_psi", "legendFormat": "prediction PSI", "refId": "B"},
+        {"expr": "avg(feature_ks_statistic)", "legendFormat": "avg feature KS", "refId": "C"},
+        {"expr": "topk(3, feature_ks_statistic)", "legendFormat": "top KS - {{feature}}", "refId": "D"}
+      ]
+    }
+  ]
+}
