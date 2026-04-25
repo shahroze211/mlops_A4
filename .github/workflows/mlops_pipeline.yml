@@ -19,6 +19,7 @@ on:
 env:
   IMAGE_REGISTRY: ghcr.io/${{ github.repository }}
   PYTHON_VERSION: "3.10"
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 permissions:
   contents: read
@@ -41,7 +42,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
 
       - name: Install dependencies
         run: |
