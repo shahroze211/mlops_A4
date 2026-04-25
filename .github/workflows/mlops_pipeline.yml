@@ -17,7 +17,7 @@ on:
     types: [drift_alert, performance_drop]
 
 env:
-  IMAGE_REGISTRY: ghcr.io/${{ github.repository }}
+  IMAGE_REGISTRY: ghcr.io/shahroze211/mlops_a4
   PYTHON_VERSION: "3.10"
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
